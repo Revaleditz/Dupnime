@@ -1,99 +1,91 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const cheerio = require('cheerio');
 
 const app = express();
 app.use(cors({ origin: '*' }));
 
-// Endpoint API Otakudesu
-const OTAKU_API = 'https://unofficial-otakudesu-api-me.vercel.app/api';
-const OTAKU_API_BACKUP = 'https://otakudesu-anime-api.vercel.app/api/v1';
+const BASE_URL = 'https://otakudesu.cloud';
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7'
+};
 
-// 1. Ambil Katalog Ongoing Otakudesu
+// 1. Scraping Katalog Ongoing Langsung dari Otakudesu
 app.get('/api/anime', async (req, res) => {
   try {
-    const response = await axios.get(`${OTAKU_API}/ongoing`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 8000
-    });
-    
-    const list = response.data.ongoing || response.data.data || [];
-    const formatted = list.map(item => ({
-      title: item.title,
-      thumb: item.thumb || item.poster,
-      endpoint: item.endpoint,
-      episode: item.current_episode || item.episode
-    }));
+    const { data } = await axios.get(`${BASE_URL}/ongoing-anime/`, { headers: HEADERS, timeout: 10000 });
+    const $ = cheerio.load(data);
+    const animeList = [];
 
-    res.json({ status: 'success', data: formatted });
+    $('.vennt .thumb, .detalist .thumb').each((_, el) => {
+      const title = $(el).find('h2, .j24').text().trim() \vert{}\vert{}$(el).find('img').attr('alt') || 'Anime';
+      const thumb = $(el).find('img').attr('src') \vert{}\vert{}$(el).find('img').attr('data-src') || '';
+      const href = $(el).find('a').attr('href') \vert{}\vert{}$(el).closest('a').attr('href') || '';
+      const episode = $(el).find('.epz').text().trim() || 'Ongoing';
+
+      const slug = href.split('/anime/')[1]?.replace(/\//g, '') || '';
+
+      if (title && slug) {
+        animeList.push({ title, thumb, slug, episode });
+      }
+    });
+
+    res.json({ status: 'success', data: animeList });
   } catch (err) {
-    try {
-      const backupRes = await axios.get(`${OTAKU_API_BACKUP}/ongoing/1`, { timeout: 8000 });
-      const list = backupRes.data.ongoingList || [];
-      const formatted = list.map(item => ({
-        title: item.title,
-        thumb: item.thumb,
-        endpoint: item.endpoint,
-        episode: item.episode
-      }));
-      res.json({ status: 'success', data: formatted });
-    } catch (e) {
-      res.status(500).json({ status: 'error', message: 'Gagal memuat katalog Otakudesu' });
-    }
+    res.status(500).json({ status: 'error', message: 'Gagal scraping Otakudesu: ' + err.message });
   }
 });
 
-// 2. Ambil Daftar Episode Otakudesu berdasarkan Anime
+// 2. Scraping Daftar Episode Langsung dari Halaman Anime Otakudesu
 app.get('/api/episodes', async (req, res) => {
-  const { endpoint, title } = req.query;
+  const { slug } = req.query;
+
+  if (!slug) return res.status(400).json({ status: 'error', message: 'Slug anime diperlukan' });
 
   try {
-    let epList = [];
-    let targetEndpoint = endpoint;
+    const { data } = await axios.get(`${BASE_URL}/anime/${slug}/`, { headers: HEADERS, timeout: 10000 });
+    const $ = cheerio.load(data);
+    const episodes = [];
 
-    // Jika belum punya endpoint, cari dulu via search query
-    if (!targetEndpoint && title) {
-      const searchRes = await axios.get(`${OTAKU_API}/search/${encodeURIComponent(title)}`, { timeout: 8000 });
-      const searchList = searchRes.data.search || searchRes.data.results || [];
-      if (searchList.length > 0) {
-        targetEndpoint = searchList[0].endpoint;
+    $('.episodelist ul li').each((_, el) => {
+      const a = $(el).find('a');
+      const title = a.text().trim();
+      const href = a.attr('href') || '';
+      const epSlug = href.split('/episode/')[1]?.replace(/\//g, '') || '';
+
+      if (epSlug && title) {
+        episodes.push({ title, epSlug });
       }
-    }
+    });
 
-    if (targetEndpoint) {
-      const detailRes = await axios.get(`${OTAKU_API}/anime/${targetEndpoint}`, { timeout: 8000 });
-      epList = detailRes.data.episode_list || detailRes.data.episodes || [];
-    }
-
-    const formatted = epList.map((ep, idx) => ({
-      title: ep.title || ep.episode_title,
-      endpoint: ep.endpoint,
-      number: ep.title ? (ep.title.match(/\d+/) || [epList.length - idx])[0] : (epList.length - idx)
-    })).reverse(); // Urutkan dari Episode 1
-
-    if (formatted.length > 0) {
-      res.json({ status: 'success', episodes: formatted });
-    } else {
-      res.json({ status: 'error', message: 'Daftar episode Otakudesu tidak ditemukan.' });
-    }
+    // Urutkan dari Episode 1 ke atas
+    res.json({ status: 'success', episodes: episodes.reverse() });
   } catch (err) {
     res.json({ status: 'error', message: 'Gagal mengambil episode dari Otakudesu.' });
   }
 });
 
-// 3. Ambil Link Player Embed Stream Otakudesu (Desustream/Streamhide)
+// 3. Scraping Player Embed Stream (.iframe) dari Halaman Episode Otakudesu
 app.get('/api/stream', async (req, res) => {
-  const { episodeEndpoint } = req.query;
+  const { epSlug } = req.query;
 
-  if (!episodeEndpoint) {
-    return res.status(400).json({ status: 'error', message: 'episodeEndpoint diperlukan' });
-  }
+  if (!epSlug) return res.status(400).json({ status: 'error', message: 'epSlug diperlukan' });
 
   try {
-    const epRes = await axios.get(`${OTAKU_API}/eps/${episodeEndpoint}`, { timeout: 8000 });
-    const data = epRes.data;
+    const { data } = await axios.get(`${BASE_URL}/episode/${epSlug}/`, { headers: HEADERS, timeout: 10000 });
+    const $ = cheerio.load(data);
 
-    const streamUrl = data.stream_url || data.streamLink || data.low_stream || (data.mirror_embed?.desustream?.strm) || '';
+    let streamUrl = $('#embed_holder iframe').attr('src') 
+      || $('.responsive-embed-stream iframe').attr('src')
+      || $('iframe[src*="desustream"]').attr('src')
+      || $('iframe[src*="streamhide"]').attr('src')
+      || $('iframe').attr('src') || '';
+
+    if (streamUrl.startsWith('//')) {
+      streamUrl = 'https:' + streamUrl;
+    }
 
     if (streamUrl) {
       res.json({ status: 'success', streamUrl });
@@ -101,7 +93,7 @@ app.get('/api/stream', async (req, res) => {
       res.json({ status: 'error', message: 'Link player Otakudesu tidak ditemukan.' });
     }
   } catch (err) {
-    res.json({ status: 'error', message: 'Gagal mengambil video stream Otakudesu.' });
+    res.json({ status: 'error', message: 'Gagal memuat video player Otakudesu.' });
   }
 });
 
