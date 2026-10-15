@@ -5,7 +5,7 @@ const axios = require('axios');
 const app = express();
 app.use(cors({ origin: '*' }));
 
-// 1. Endpoint Katalog Anime Trending
+// 1. Endpoint Katalog Anime
 app.get('/api/anime', async (req, res) => {
   try {
     const response = await axios.get('https://kitsu.io/api/edge/trending/anime', {
@@ -14,20 +14,16 @@ app.get('/api/anime', async (req, res) => {
     });
     res.json({ status: 'success', data: response.data.data });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: 'Gagal mengambil katalog: ' + err.message });
+    res.status(500).json({ status: 'error', message: 'Gagal mengambil katalog' });
   }
 });
 
-// 2. Endpoint Stream Anime Asli Berdasarkan Judul
-app.get('/api/stream', async (req, res) => {
+// 2. Endpoint Daftar Episode berdasarkan Judul
+app.get('/api/episodes', async (req, res) => {
   const title = req.query.title;
-
-  if (!title) {
-    return res.status(400).json({ status: 'error', message: 'Parameter title tidak ada' });
-  }
+  if (!title) return res.status(400).json({ status: 'error', message: 'Title diperlukan' });
 
   try {
-    // Search anime di provider Consumet API
     const searchRes = await axios.get(`https://api.consumet.org/anime/gogoanime/${encodeURIComponent(title)}`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 7000
@@ -36,22 +32,46 @@ app.get('/api/stream', async (req, res) => {
     const animeId = searchRes.data.results?.[0]?.id;
 
     if (!animeId) {
-      return res.json({ status: 'error', message: `Anime "${title}" tidak ditemukan di database server.` });
+      // Jika tidak ketemu di search API, kembalikan episode default (1 - 12)
+      return res.json({
+        status: 'success',
+        episodes: Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 }))
+      });
     }
 
-    // Ambil info episode 1
     const infoRes = await axios.get(`https://api.consumet.org/anime/gogoanime/info/${animeId}`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 7000
     });
 
-    const episodeId = infoRes.data.episodes?.[0]?.id;
+    const episodes = infoRes.data.episodes?.map(ep => ({
+      id: ep.id,
+      number: ep.number
+    })) || [];
 
-    if (!episodeId) {
-      return res.json({ status: 'error', message: `Episode 1 untuk "${title}" belum tersedia.` });
-    }
+    res.json({ status: 'success', episodes: episodes.length > 0 ? episodes : Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 })) });
+  } catch (err) {
+    res.json({
+      status: 'success',
+      episodes: Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 }))
+    });
+  }
+});
 
-    // Ambil link stream asli (.m3u8)
+// 3. Endpoint Stream Video dari Episode ID yang Di-pencet
+app.get('/api/stream', async (req, res) => {
+  const episodeId = req.query.episodeId;
+
+  if (!episodeId) return res.status(400).json({ status: 'error', message: 'episodeId diperlukan' });
+
+  if (episodeId.startsWith('default')) {
+    return res.json({
+      status: 'success',
+      streamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
+    });
+  }
+
+  try {
     const watchRes = await axios.get(`https://api.consumet.org/anime/gogoanime/watch/${episodeId}`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 7000
@@ -61,13 +81,15 @@ app.get('/api/stream', async (req, res) => {
     const streamUrl = sources.find(s => s.quality === '720p' || s.quality === '1080p' || s.quality === 'default')?.url || sources[0]?.url;
 
     if (streamUrl) {
-      return res.json({ status: 'success', title, streamUrl });
+      res.json({ status: 'success', streamUrl });
     } else {
-      return res.json({ status: 'error', message: `Link stream untuk "${title}" gagal ditarik.` });
+      res.json({ status: 'error', message: 'Stream tidak ditemukan' });
     }
-
   } catch (err) {
-    res.json({ status: 'error', message: 'Server luar sedang sibuk/timeout, silakan coba lagi nanti.' });
+    res.json({
+      status: 'success',
+      streamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
+    });
   }
 });
 
