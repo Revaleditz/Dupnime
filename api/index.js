@@ -5,91 +5,103 @@ const axios = require('axios');
 const app = express();
 app.use(cors({ origin: '*' }));
 
-// 1. Endpoint Katalog Anime
+// Endpoint API Otakudesu
+const OTAKU_API = 'https://unofficial-otakudesu-api-me.vercel.app/api';
+const OTAKU_API_BACKUP = 'https://otakudesu-anime-api.vercel.app/api/v1';
+
+// 1. Ambil Katalog Ongoing Otakudesu
 app.get('/api/anime', async (req, res) => {
   try {
-    const response = await axios.get('https://kitsu.io/api/edge/trending/anime', {
+    const response = await axios.get(`${OTAKU_API}/ongoing`, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 6000
+      timeout: 8000
     });
-    res.json({ status: 'success', data: response.data.data });
+    
+    const list = response.data.ongoing || response.data.data || [];
+    const formatted = list.map(item => ({
+      title: item.title,
+      thumb: item.thumb || item.poster,
+      endpoint: item.endpoint,
+      episode: item.current_episode || item.episode
+    }));
+
+    res.json({ status: 'success', data: formatted });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: 'Gagal mengambil katalog' });
+    try {
+      const backupRes = await axios.get(`${OTAKU_API_BACKUP}/ongoing/1`, { timeout: 8000 });
+      const list = backupRes.data.ongoingList || [];
+      const formatted = list.map(item => ({
+        title: item.title,
+        thumb: item.thumb,
+        endpoint: item.endpoint,
+        episode: item.episode
+      }));
+      res.json({ status: 'success', data: formatted });
+    } catch (e) {
+      res.status(500).json({ status: 'error', message: 'Gagal memuat katalog Otakudesu' });
+    }
   }
 });
 
-// 2. Endpoint Daftar Episode berdasarkan Judul
+// 2. Ambil Daftar Episode Otakudesu berdasarkan Anime
 app.get('/api/episodes', async (req, res) => {
-  const title = req.query.title;
-  if (!title) return res.status(400).json({ status: 'error', message: 'Title diperlukan' });
+  const { endpoint, title } = req.query;
 
   try {
-    const searchRes = await axios.get(`https://api.consumet.org/anime/gogoanime/${encodeURIComponent(title)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 7000
-    });
+    let epList = [];
+    let targetEndpoint = endpoint;
 
-    const animeId = searchRes.data.results?.[0]?.id;
-
-    if (!animeId) {
-      // Jika tidak ketemu di search API, kembalikan episode default (1 - 12)
-      return res.json({
-        status: 'success',
-        episodes: Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 }))
-      });
+    // Jika belum punya endpoint, cari dulu via search query
+    if (!targetEndpoint && title) {
+      const searchRes = await axios.get(`${OTAKU_API}/search/${encodeURIComponent(title)}`, { timeout: 8000 });
+      const searchList = searchRes.data.search || searchRes.data.results || [];
+      if (searchList.length > 0) {
+        targetEndpoint = searchList[0].endpoint;
+      }
     }
 
-    const infoRes = await axios.get(`https://api.consumet.org/anime/gogoanime/info/${animeId}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 7000
-    });
+    if (targetEndpoint) {
+      const detailRes = await axios.get(`${OTAKU_API}/anime/${targetEndpoint}`, { timeout: 8000 });
+      epList = detailRes.data.episode_list || detailRes.data.episodes || [];
+    }
 
-    const episodes = infoRes.data.episodes?.map(ep => ({
-      id: ep.id,
-      number: ep.number
-    })) || [];
+    const formatted = epList.map((ep, idx) => ({
+      title: ep.title || ep.episode_title,
+      endpoint: ep.endpoint,
+      number: ep.title ? (ep.title.match(/\d+/) || [epList.length - idx])[0] : (epList.length - idx)
+    })).reverse(); // Urutkan dari Episode 1
 
-    res.json({ status: 'success', episodes: episodes.length > 0 ? episodes : Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 })) });
+    if (formatted.length > 0) {
+      res.json({ status: 'success', episodes: formatted });
+    } else {
+      res.json({ status: 'error', message: 'Daftar episode Otakudesu tidak ditemukan.' });
+    }
   } catch (err) {
-    res.json({
-      status: 'success',
-      episodes: Array.from({ length: 12 }, (_, i) => ({ id: `default-ep-${i+1}`, number: i + 1 }))
-    });
+    res.json({ status: 'error', message: 'Gagal mengambil episode dari Otakudesu.' });
   }
 });
 
-// 3. Endpoint Stream Video dari Episode ID yang Di-pencet
+// 3. Ambil Link Player Embed Stream Otakudesu (Desustream/Streamhide)
 app.get('/api/stream', async (req, res) => {
-  const episodeId = req.query.episodeId;
+  const { episodeEndpoint } = req.query;
 
-  if (!episodeId) return res.status(400).json({ status: 'error', message: 'episodeId diperlukan' });
-
-  if (episodeId.startsWith('default')) {
-    return res.json({
-      status: 'success',
-      streamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
-    });
+  if (!episodeEndpoint) {
+    return res.status(400).json({ status: 'error', message: 'episodeEndpoint diperlukan' });
   }
 
   try {
-    const watchRes = await axios.get(`https://api.consumet.org/anime/gogoanime/watch/${episodeId}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 7000
-    });
+    const epRes = await axios.get(`${OTAKU_API}/eps/${episodeEndpoint}`, { timeout: 8000 });
+    const data = epRes.data;
 
-    const sources = watchRes.data.sources || [];
-    const streamUrl = sources.find(s => s.quality === '720p' || s.quality === '1080p' || s.quality === 'default')?.url || sources[0]?.url;
+    const streamUrl = data.stream_url || data.streamLink || data.low_stream || (data.mirror_embed?.desustream?.strm) || '';
 
     if (streamUrl) {
       res.json({ status: 'success', streamUrl });
     } else {
-      res.json({ status: 'error', message: 'Stream tidak ditemukan' });
+      res.json({ status: 'error', message: 'Link player Otakudesu tidak ditemukan.' });
     }
   } catch (err) {
-    res.json({
-      status: 'success',
-      streamUrl: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8'
-    });
+    res.json({ status: 'error', message: 'Gagal mengambil video stream Otakudesu.' });
   }
 });
 
